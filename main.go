@@ -53,11 +53,20 @@ func main() {
 	s := store.New(database)
 
 	router := gin.Default()
+
+	// In production the only path to this service is the cloudflared tunnel,
+	// so don't trust X-Forwarded-For from arbitrary peers; take the client IP
+	// from Cloudflare's CF-Connecting-IP header instead (absent in local dev,
+	// where Gin falls back to the socket address).
+	_ = router.SetTrustedProxies(nil)
+	router.TrustedPlatform = gin.PlatformCloudflare
+
 	router.Use(corsMiddleware())
 
-	// Health check: confirms the database is reachable.
+	// Health check: confirms the database is reachable. Tied to the request
+	// context so a wedged database fails the check instead of hanging it.
 	router.GET("/health", func(c *gin.Context) {
-		if err := database.Ping(); err != nil {
+		if err := database.PingContext(c.Request.Context()); err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy"})
 			return
 		}
@@ -77,17 +86,30 @@ func main() {
 	server := &http.Server{
 		Addr:    ":" + port,
 		Handler: router,
+		// The API is public; cap how long a connection can stall so slow
+		// clients can't pin connections open indefinitely.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 
+	// Surfacing the listen error through a channel (rather than log.Fatal in
+	// the goroutine) lets the deferred database.Close still run.
+	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("MSLatencyTracker listening on port %s", port)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("Server failed: %v", err)
+			serverErr <- err
 		}
 	}()
 
-	<-ctx.Done()
-	log.Println("Shutting down...")
+	select {
+	case <-ctx.Done():
+		log.Println("Shutting down...")
+	case err := <-serverErr:
+		log.Printf("Server failed: %v", err)
+	}
 
 	// Give in-flight requests a grace period to complete.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -145,13 +167,15 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-// getenvInt is like getenv but parses the value as an integer, falling back
-// on a missing or invalid value.
+// getenvInt is like getenv but parses the value as a positive integer,
+// falling back on a missing, invalid, or non-positive value. Every caller
+// builds a ticker or timeout duration, where zero or negative would panic.
 func getenvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
+		log.Printf("Ignoring %s=%q: not a positive integer; using default %d", key, v, fallback)
 	}
 	return fallback
 }

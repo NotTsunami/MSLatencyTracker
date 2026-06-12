@@ -49,25 +49,26 @@ type AverageResult struct {
 	SampleCount int     `json:"sampleCount"`
 }
 
+// chanKey identifies one channel of one world in the latest-reading cache.
+type chanKey struct {
+	world   config.World
+	channel int
+}
+
 // Store bundles the database handle with the in-memory latest-reading cache.
 type Store struct {
 	db *sql.DB
 
 	mu     sync.RWMutex
-	latest map[string]LatencyReading
+	latest map[chanKey]LatencyReading
 }
 
 // New constructs a Store.
 func New(db *sql.DB) *Store {
 	return &Store{
 		db:     db,
-		latest: make(map[string]LatencyReading),
+		latest: make(map[chanKey]LatencyReading),
 	}
-}
-
-// key builds the cache key for a world+channel pair, e.g. "Kronos:7".
-func key(w config.World, channel int) string {
-	return fmt.Sprintf("%s:%d", w, channel)
 }
 
 // RecordLatencyBatch updates the in-memory cache for every sample and appends
@@ -80,7 +81,7 @@ func (s *Store) RecordLatencyBatch(samples []LatencySample) {
 	// Release the lock before the slower database call below.
 	s.mu.Lock()
 	for _, sample := range samples {
-		s.latest[key(sample.World, sample.Channel)] = LatencyReading{
+		s.latest[chanKey{sample.World, sample.Channel}] = LatencyReading{
 			LatencyMs: sample.LatencyMs,
 			Timestamp: sample.Timestamp,
 		}
@@ -122,7 +123,7 @@ func (s *Store) GetAllLatest(w config.World) []ChannelLatency {
 	ips := config.Servers[w]
 	for i := range ips {
 		channel := i + 1
-		if reading, ok := s.latest[key(w, channel)]; ok {
+		if reading, ok := s.latest[chanKey{w, channel}]; ok {
 			results = append(results, ChannelLatency{
 				Channel:   channel,
 				LatencyMs: reading.LatencyMs,
@@ -137,7 +138,7 @@ func (s *Store) GetAllLatest(w config.World) []ChannelLatency {
 func (s *Store) GetLatest(w config.World, channel int) (LatencyReading, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	reading, ok := s.latest[key(w, channel)]
+	reading, ok := s.latest[chanKey{w, channel}]
 	return reading, ok
 }
 
@@ -168,7 +169,9 @@ func (s *Store) GetAverage(w config.World, channel int, period time.Duration) (A
 }
 
 // GetHistory returns every data point for a channel within the period,
-// ordered oldest-first (ready for a time-series chart).
+// ordered oldest-first (ready for a time-series chart). Unlike GetAverage,
+// unreachable readings (-1) are deliberately included so charts can show
+// outage gaps rather than silently skipping them.
 func (s *Store) GetHistory(w config.World, channel int, period time.Duration) ([]LatencyDataPoint, error) {
 	since := time.Now().Add(-period).UnixMilli()
 

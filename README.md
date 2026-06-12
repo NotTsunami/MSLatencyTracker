@@ -47,6 +47,8 @@ All endpoints are under `/api/v1`.
 | GET | `/health` | Database connectivity check |
 
 A `latencyMs` value of `-1` indicates the server was unreachable or timed out.
+These readings appear in `/history` (so charts can show outage gaps) but are
+excluded from `/average`.
 
 ### Example Responses
 
@@ -82,9 +84,6 @@ A `latencyMs` value of `-1` indicates the server was unreachable or timed out.
 ```
 MSLatencyTracker-Go/
 ├── main.go                   # Entry point: config, wiring, server start
-├── cmd/
-│   └── portcheck/
-│       └── main.go           # Standalone check: every IP reachable on :8585
 ├── config/
 │   └── servers.go            # World type + IP configuration + lookup helpers
 ├── db/
@@ -112,6 +111,7 @@ Copy `.env.example` to `.env` and fill in the values:
 | `POSTGRES_PASSWORD` | Compose only | — | Password for the bundled postgres container |
 | `POSTGRES_USER` | No | `mslatency` | User for the bundled postgres container |
 | `POSTGRES_DB` | No | `mslatency` | Database name in the bundled postgres container |
+| `TUNNEL_TOKEN` | Compose only | — | Cloudflare Tunnel token for the bundled cloudflared container |
 | `DATABASE_URL` | Local dev only | — | PostgreSQL connection string; Docker Compose derives its own from the `POSTGRES_*` values |
 | `PORT` | No | `8080` | HTTP server port |
 | `PING_INTERVAL_MS` | No | `300000` | Ping interval in milliseconds (5 min) |
@@ -154,19 +154,61 @@ curl http://localhost:8080/api/v1/worlds
 
 ## Deployment
 
-Build and run with Docker Compose, which bundles a PostgreSQL container —
-no external database needed:
+Docker Compose runs three containers — the tracker, a bundled PostgreSQL, and
+a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+(`cloudflared`) that publishes the API without exposing the host:
 
-```bash
-cp .env.example .env   # set POSTGRES_PASSWORD
-docker compose up -d --build
+```
+internet ──https──▶ Cloudflare edge ──tunnel──▶ cloudflared ──http──▶ tracker ──▶ postgres
+                                                 (container)          (:8080)     (internal)
 ```
 
-The compose file restarts the services unless stopped and exposes port 8080.
-The postgres container publishes no ports and sits on an
-`internal: true` network reachable only by the tracker service, so it is
-never exposed to the internet. Data persists across restarts in the `pgdata`
-named volume.
+Neither the tracker nor postgres publishes any host port. `cloudflared` makes
+an **outbound-only** connection to Cloudflare, so there is no router
+port-forwarding and your origin IP never appears in DNS. Postgres additionally
+sits on an `internal: true` network reachable only by the tracker.
 
-The service shuts down gracefully on `SIGINT`/`SIGTERM`: the ping and cleanup
-workers stop, and in-flight HTTP requests get a 10-second grace period.
+### 1. Create the tunnel
+
+Use a remotely-managed (token) tunnel — ingress is configured in the
+Cloudflare dashboard, and the container only needs the token:
+
+1. Cloudflare dashboard → **Zero Trust** → **Networks** → **Tunnels** →
+   **Create a tunnel** → **Cloudflared**.
+2. Name it (e.g. `mslatencytracker`) → **Save**, then copy the tunnel token
+   (the long string after `--token` in the install command shown — you do
+   **not** run that command; Compose runs `cloudflared` for you).
+3. **Public Hostname** tab → **Add a public hostname**:
+   - **Subdomain/Domain:** your choice (e.g. `latency.example.com`)
+   - **Type:** `HTTP`
+   - **URL:** `tracker:8080`  ← the Compose service name and internal port
+
+Cloudflare auto-creates the DNS record pointing at the tunnel.
+
+### 2. Configure and start
+
+```bash
+cp .env.example .env   # set POSTGRES_PASSWORD and TUNNEL_TOKEN
+docker compose up -d --build
+docker compose logs -f cloudflared   # look for "Registered tunnel connection"
+```
+
+Verify from any machine:
+
+```bash
+curl https://latency.example.com/health
+curl https://latency.example.com/api/v1/worlds
+dig +short latency.example.com   # Cloudflare anycast IPs — never your home IP
+```
+
+> **Local testing without a tunnel:** temporarily add a
+> `ports: ["8080:8080"]` mapping to the `tracker` service, or run the app
+> directly with `go run .` (see Local Development).
+
+Data persists across restarts in the `pgdata` named volume. The service shuts
+down gracefully on `SIGINT`/`SIGTERM`: the ping and cleanup workers stop, and
+in-flight HTTP requests get a 10-second grace period.
+
+Because the app sits behind Cloudflare, it reads the real client IP from the
+`CF-Connecting-IP` header (Gin's `TrustedPlatform`) and otherwise trusts no
+proxy headers.

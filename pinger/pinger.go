@@ -45,9 +45,14 @@ func pingAllChannels(s *store.Store, timeout time.Duration) {
 	// pass line up on the same x-axis value in charts.
 	timestamp := time.Now().UnixMilli()
 
-	// One pre-allocated slot per channel; each goroutine writes only its own
-	// slot, so the WaitGroup is the only synchronization needed.
-	samples := []store.LatencySample{}
+	// One slot per channel, all in place before any goroutine starts; each
+	// goroutine writes only its own slot, so the WaitGroup is the only
+	// synchronization needed.
+	total := 0
+	for _, w := range config.WorldOrder {
+		total += len(config.Servers[w])
+	}
+	samples := make([]store.LatencySample, 0, total)
 	for _, w := range config.WorldOrder {
 		for i := range config.Servers[w] {
 			samples = append(samples, store.LatencySample{World: w, Channel: i + 1, Timestamp: timestamp})

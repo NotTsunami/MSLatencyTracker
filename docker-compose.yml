@@ -3,8 +3,12 @@ services:
     build: .
     container_name: mslatencytracker-go
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    # Internal networks only — the API is published through the Cloudflare
+    # Tunnel (cloudflared service below), never on the host. To hit it
+    # directly during local testing, temporarily add a `ports: ["8080:8080"]`
+    # mapping.
+    expose:
+      - "8080"
     env_file:
       - .env
     environment:
@@ -14,8 +18,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # "default" provides internet access for the pings and the published API
-    # port; "backend" provides the private path to postgres.
+    # "default" provides internet access for the pings and carries the
+    # tunnel-to-API traffic; "backend" provides the private path to postgres.
     networks:
       - default
       - backend
@@ -25,6 +29,23 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # Outbound-only connection to Cloudflare's edge; ingress (public hostname →
+  # http://tracker:8080) is configured in the Zero Trust dashboard, so the
+  # container only needs the tunnel token. No router port-forwarding and no
+  # exposed home IP.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: mslatencytracker-tunnel
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+    depends_on:
+      tracker:
+        condition: service_healthy
+    networks:
+      - default
 
   postgres:
     image: postgres:18-alpine
