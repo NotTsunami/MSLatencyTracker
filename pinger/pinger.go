@@ -14,18 +14,18 @@ import (
 	"mslatencytracker/store"
 )
 
-// pingOnce pings a single IP once and records the result.
+// pingOnce pings a single IP once and returns the round-trip time in
+// milliseconds.
 //
-// On any failure we record -1 (the agreed "unreachable" sentinel) so the API
+// On any failure it returns -1 (the agreed "unreachable" sentinel) so the API
 // can still report that the channel was checked but did not respond.
-func pingOnce(s *store.Store, w config.World, channel int, ip string, timestamp int64, timeout time.Duration) {
+func pingOnce(w config.World, channel int, ip string, timeout time.Duration) float64 {
 	latencyMs := -1.0
 
 	pinger, err := probing.NewPinger(ip)
 	if err != nil {
 		log.Printf("Ping setup failed for %s ch%d (%s): %v", w, channel, ip, err)
-		s.RecordLatency(w, channel, latencyMs, timestamp)
-		return
+		return latencyMs
 	}
 
 	pinger.Count = 1
@@ -43,35 +43,39 @@ func pingOnce(s *store.Store, w config.World, channel int, ip string, timestamp 
 		}
 	}
 
-	s.RecordLatency(w, channel, latencyMs, timestamp)
+	return latencyMs
 }
 
 // pingAllChannels pings every configured channel of every world in parallel,
-// then waits for all of them to finish before returning.
+// waits for all of them to finish, then records the whole cycle as one batch
+// (a single multi-row INSERT).
 func pingAllChannels(s *store.Store, timeout time.Duration) {
 	// One shared timestamp for the whole cycle, so all readings from this
 	// pass line up on the same x-axis value in charts.
 	timestamp := time.Now().UnixMilli()
 
-	var wg sync.WaitGroup
-	count := 0
-
+	// One pre-allocated slot per channel; each goroutine writes only its own
+	// slot, so the WaitGroup is the only synchronization needed.
+	samples := []store.LatencySample{}
 	for _, w := range config.WorldOrder {
-		ips := config.Servers[w]
-		for i, ip := range ips {
-			channel := i + 1
-			count++
-			wg.Add(1)
-
-			go func(w config.World, channel int, ip string) {
-				defer wg.Done()
-				pingOnce(s, w, channel, ip, timestamp, timeout)
-			}(w, channel, ip)
+		for i := range config.Servers[w] {
+			samples = append(samples, store.LatencySample{World: w, Channel: i + 1, Timestamp: timestamp})
 		}
 	}
 
+	var wg sync.WaitGroup
+	for i := range samples {
+		wg.Add(1)
+		go func(sample *store.LatencySample) {
+			defer wg.Done()
+			ip := config.Servers[sample.World][sample.Channel-1]
+			sample.LatencyMs = pingOnce(sample.World, sample.Channel, ip, timeout)
+		}(&samples[i])
+	}
 	wg.Wait()
-	log.Printf("Ping cycle complete. Pinged %d servers.", count)
+
+	s.RecordLatencyBatch(samples)
+	log.Printf("Ping cycle complete. Pinged %d servers.", len(samples))
 }
 
 // Start launches the ping worker in the background and returns immediately.

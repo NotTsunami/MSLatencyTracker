@@ -28,8 +28,8 @@ func Connect(databaseURL string) (*sql.DB, error) {
 	return db, nil
 }
 
-// Migrate creates the latency_history table and its lookup index if they do
-// not already exist. Running it repeatedly is safe.
+// Migrate creates the latency_history table if it does not already exist.
+// Running it repeatedly is safe.
 func Migrate(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS latency_history (
@@ -44,10 +44,10 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 
-	_, err = db.Exec(`
-		CREATE INDEX IF NOT EXISTS idx_latency_lookup
-			ON latency_history (world, channel, recorded_at DESC);
-	`)
+	// The primary key's btree already covers every query shape (Postgres
+	// scans it backwards for DESC), so the old standalone lookup index was
+	// pure write amplification. Remove it from deployments that have it.
+	_, err = db.Exec(`DROP INDEX IF EXISTS idx_latency_lookup;`)
 	return err
 }
 

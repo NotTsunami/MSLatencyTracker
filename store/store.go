@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,16 @@ import (
 type LatencyReading struct {
 	LatencyMs float64 `json:"latencyMs"`
 	Timestamp int64   `json:"timestamp"`
+}
+
+// LatencySample is one channel measurement from a ping cycle, destined for
+// the cache and the history table. A LatencyMs of -1 means the server was
+// unreachable / timed out.
+type LatencySample struct {
+	World     config.World
+	Channel   int
+	LatencyMs float64
+	Timestamp int64
 }
 
 // ChannelLatency is a reading plus its channel number.
@@ -59,24 +70,42 @@ func key(w config.World, channel int) string {
 	return fmt.Sprintf("%s:%d", w, channel)
 }
 
-// RecordLatency updates the in-memory cache and appends a row to the history
-// table. A latencyMs of -1 means the server was unreachable / timed out.
-func (s *Store) RecordLatency(w config.World, channel int, latencyMs float64, timestamp int64) {
+// RecordLatencyBatch updates the in-memory cache for every sample and appends
+// them all to the history table in a single multi-row INSERT.
+func (s *Store) RecordLatencyBatch(samples []LatencySample) {
+	if len(samples) == 0 {
+		return
+	}
+
 	// Release the lock before the slower database call below.
 	s.mu.Lock()
-	s.latest[key(w, channel)] = LatencyReading{LatencyMs: latencyMs, Timestamp: timestamp}
+	for _, sample := range samples {
+		s.latest[key(sample.World, sample.Channel)] = LatencyReading{
+			LatencyMs: sample.LatencyMs,
+			Timestamp: sample.Timestamp,
+		}
+	}
 	s.mu.Unlock()
 
-	_, err := s.db.Exec(
-		`INSERT INTO latency_history (world, channel, recorded_at, latency_ms)
-		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (world, channel, recorded_at) DO NOTHING`,
-		string(w), channel, timestamp, latencyMs,
-	)
-	if err != nil {
-		// Log and move on: a single failed insert shouldn't take down the
-		// whole ping cycle.
-		log.Printf("Failed to persist latency for %s ch%d: %v", w, channel, err)
+	// One placeholder group per sample: VALUES ($1,$2,$3,$4),($5,$6,$7,$8)…
+	// Postgres caps placeholders at 65535, i.e. over 16k samples per call —
+	// far beyond a full ping cycle.
+	var query strings.Builder
+	query.WriteString(`INSERT INTO latency_history (world, channel, recorded_at, latency_ms) VALUES `)
+	args := make([]any, 0, len(samples)*4)
+	for i, sample := range samples {
+		if i > 0 {
+			query.WriteByte(',')
+		}
+		fmt.Fprintf(&query, "($%d,$%d,$%d,$%d)", i*4+1, i*4+2, i*4+3, i*4+4)
+		args = append(args, string(sample.World), sample.Channel, sample.Timestamp, sample.LatencyMs)
+	}
+	query.WriteString(` ON CONFLICT (world, channel, recorded_at) DO NOTHING`)
+
+	if _, err := s.db.Exec(query.String(), args...); err != nil {
+		// Log and move on: a failed insert shouldn't take down the whole
+		// ping cycle; the in-memory cache is already updated.
+		log.Printf("Failed to persist %d latency samples: %v", len(samples), err)
 	}
 }
 
