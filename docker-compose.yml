@@ -10,9 +10,50 @@ services:
       - "8080:8080"
     env_file:
       - .env
+    environment:
+      # Points at the bundled postgres service over the internal network,
+      # overriding any DATABASE_URL from .env.
+      DATABASE_URL: postgres://${POSTGRES_USER:-mslatency}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-mslatency}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # "default" provides internet access for the pings and the published API
+    # port; "backend" provides the private path to postgres.
+    networks:
+      - default
+      - backend
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  postgres:
+    image: postgres:18-alpine
+    container_name: mslatencytracker-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mslatency}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-mslatency}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    # No published ports, and only on the internal network: postgres is
+    # reachable by the tracker service but never from outside the host.
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mslatency} -d ${POSTGRES_DB:-mslatency}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  # internal: true blocks all traffic in or out of this network except
+  # between its own containers.
+  backend:
+    internal: true
+
+volumes:
+  pgdata:

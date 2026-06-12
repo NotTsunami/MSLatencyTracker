@@ -105,7 +105,10 @@ Copy `.env.example` to `.env` and fill in the values:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
+| `POSTGRES_PASSWORD` | Compose only | — | Password for the bundled postgres container |
+| `POSTGRES_USER` | No | `mslatency` | User for the bundled postgres container |
+| `POSTGRES_DB` | No | `mslatency` | Database name in the bundled postgres container |
+| `DATABASE_URL` | Local dev only | — | PostgreSQL connection string; Docker Compose derives its own from the `POSTGRES_*` values |
 | `PORT` | No | `8080` | HTTP server port |
 | `PING_INTERVAL_MS` | No | `300000` | Ping interval in milliseconds (5 min) |
 | `PING_TIMEOUT_S` | No | `5` | Per-ping timeout in seconds |
@@ -116,7 +119,7 @@ Copy `.env.example` to `.env` and fill in the values:
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - PostgreSQL (local or remote)
 - On Linux, ICMP ping needs the `NET_RAW` capability or root. On Windows and
   macOS, running the binary normally is sufficient.
@@ -149,15 +152,19 @@ curl http://localhost:8080/api/v1/worlds
 
 ## Deployment
 
-Build and run with Docker Compose:
+Build and run with Docker Compose, which bundles a PostgreSQL container —
+no external database needed:
 
 ```bash
-cp .env.example .env   # set DATABASE_URL
+cp .env.example .env   # set POSTGRES_PASSWORD
 docker compose up -d --build
 ```
 
 The compose file grants `NET_RAW` for ICMP, restarts unless stopped, and
-exposes port 8080.
+exposes port 8080. The postgres container publishes no ports and sits on an
+`internal: true` network reachable only by the tracker service, so it is
+never exposed to the internet. Data persists across restarts in the `pgdata`
+named volume.
 
 The service shuts down gracefully on `SIGINT`/`SIGTERM`: the ping and cleanup
 workers stop, and in-flight HTTP requests get a 10-second grace period.
