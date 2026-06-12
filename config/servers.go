@@ -15,8 +15,9 @@ const (
 )
 
 // Servers maps each world to its channel IP addresses. The slice index
-// determines the channel number: index 0 is channel 1, and so on. Empty
-// worlds are configured but have no channels yet.
+// determines the channel number: index 0 is channel 1, and so on, so the
+// lists are append-only — inserting or reordering would silently reassign
+// existing history to the wrong channels.
 var Servers = map[World][]string{
 	Scania: {
 		"35.163.4.248",   // Channel 1

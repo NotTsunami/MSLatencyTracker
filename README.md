@@ -53,10 +53,10 @@ A `latencyMs` value of `-1` indicates the server was unreachable or timed out.
 **GET /api/v1/worlds**
 ```json
 [
-  { "name": "Scania", "channelCount": 0 },
-  { "name": "Bera", "channelCount": 0 },
+  { "name": "Scania", "channelCount": 30 },
+  { "name": "Bera", "channelCount": 30 },
   { "name": "Kronos", "channelCount": 40 },
-  { "name": "Hyperion", "channelCount": 0 }
+  { "name": "Hyperion", "channelCount": 30 }
 ]
 ```
 
