@@ -3,9 +3,6 @@ services:
     build: .
     container_name: mslatencytracker-go
     restart: unless-stopped
-    # NET_RAW lets the container open raw ICMP sockets for ping.
-    cap_add:
-      - NET_RAW
     ports:
       - "8080:8080"
     env_file:

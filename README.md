@@ -1,17 +1,18 @@
 # MSLatencyTracker-Go
 
 A Go/[Gin](https://gin-gonic.com/) microservice that monitors MapleStory game
-server latency. It pings every configured channel IP in parallel over raw ICMP
-([pro-bing](https://github.com/prometheus-community/pro-bing)) every 5 minutes,
-caches the latest reading per channel in memory, and persists history to
-PostgreSQL ([pgx](https://github.com/jackc/pgx)) for average and time-series
-queries.
+server latency. Every 5 minutes it probes every configured channel IP in
+parallel by timing a TCP handshake against the game port (8585) — the channel
+servers drop ICMP, and the handshake is exactly one round trip over the same
+path the game client uses. The latest reading per channel is cached in memory,
+and history is persisted to PostgreSQL ([pgx](https://github.com/jackc/pgx))
+for average and time-series queries.
 
 ## Architecture
 
 ```
 ┌─────────────┐    every 5 min    ┌──────────────────┐
-│ ping worker │──────────────────>│  ICMP Ping       │
+│ ping worker │──────────────────>│ TCP probe :8585  │
 │ (goroutine  │                   │  (all IPs, ||)   │
 │  + Ticker)  │                   └──────────────────┘
 └──────┬──────┘
@@ -81,6 +82,9 @@ A `latencyMs` value of `-1` indicates the server was unreachable or timed out.
 ```
 MSLatencyTracker-Go/
 ├── main.go                   # Entry point: config, wiring, server start
+├── cmd/
+│   └── portcheck/
+│       └── main.go           # Standalone check: every IP reachable on :8585
 ├── config/
 │   └── servers.go            # World type + IP configuration + lookup helpers
 ├── db/
@@ -121,8 +125,6 @@ Copy `.env.example` to `.env` and fill in the values:
 
 - Go 1.26+
 - PostgreSQL (local or remote)
-- On Linux, ICMP ping needs the `NET_RAW` capability or root. On Windows and
-  macOS, running the binary normally is sufficient.
 
 ### Run
 
@@ -160,8 +162,8 @@ cp .env.example .env   # set POSTGRES_PASSWORD
 docker compose up -d --build
 ```
 
-The compose file grants `NET_RAW` for ICMP, restarts unless stopped, and
-exposes port 8080. The postgres container publishes no ports and sits on an
+The compose file restarts the services unless stopped and exposes port 8080.
+The postgres container publishes no ports and sits on an
 `internal: true` network reachable only by the tracker service, so it is
 never exposed to the internet. Data persists across restarts in the `pgdata`
 named volume.

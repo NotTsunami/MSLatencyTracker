@@ -1,49 +1,40 @@
-// Package pinger runs the background loop that pings every configured channel
-// IP on an interval and records the round-trip latency.
+// Package pinger runs the background loop that probes every configured
+// channel IP on an interval and records the round-trip latency.
 package pinger
 
 import (
 	"context"
 	"log"
+	"net"
 	"sync"
 	"time"
-
-	probing "github.com/prometheus-community/pro-bing"
 
 	"mslatencytracker/config"
 	"mslatencytracker/store"
 )
 
-// pingOnce pings a single IP once and returns the round-trip time in
-// milliseconds.
+// gamePort is the TCP port MapleStory channel servers listen on. The latency
+// probe times a TCP handshake against it because the servers drop ICMP; the
+// handshake is exactly one network round trip, and it measures the same path
+// the game client uses.
+const gamePort = "8585"
+
+// pingOnce times a TCP handshake to a single IP and returns the round-trip
+// time in milliseconds.
 //
 // On any failure it returns -1 (the agreed "unreachable" sentinel) so the API
 // can still report that the channel was checked but did not respond.
 func pingOnce(w config.World, channel int, ip string, timeout time.Duration) float64 {
-	latencyMs := -1.0
-
-	pinger, err := probing.NewPinger(ip)
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, gamePort), timeout)
 	if err != nil {
-		log.Printf("Ping setup failed for %s ch%d (%s): %v", w, channel, ip, err)
-		return latencyMs
-	}
-
-	pinger.Count = 1
-	pinger.Timeout = timeout
-	// Raw ICMP sockets: needs NET_RAW on Linux (granted in docker-compose.yml).
-	// Unprivileged UDP ping is disallowed by many hosts.
-	pinger.SetPrivileged(true)
-
-	if err := pinger.Run(); err != nil {
 		log.Printf("Ping failed for %s ch%d (%s): %v", w, channel, ip, err)
-	} else {
-		stats := pinger.Statistics()
-		if stats.PacketsRecv > 0 {
-			latencyMs = float64(stats.AvgRtt.Microseconds()) / 1000.0
-		}
+		return -1.0
 	}
+	elapsed := time.Since(start)
+	conn.Close()
 
-	return latencyMs
+	return float64(elapsed.Microseconds()) / 1000.0
 }
 
 // pingAllChannels pings every configured channel of every world in parallel,
